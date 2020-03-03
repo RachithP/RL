@@ -117,6 +117,7 @@ class DQNAgent:
         self.optimizer.zero_grad()
         loss.backward()
 
+        # Clip grad norms on all parameter updates
         # for param in self.model.parameters():
         #     if param.grad is not None:
         #         # divide grads in core
@@ -170,11 +171,11 @@ if __name__ == "__main__":
 
             if len(agent.memory) > agent.batch_size:
                 agent.update()
-                # if(time % 4 == 0):
-                #     agent.soft_target_network_update()
+                if(time % 4 == 0):
+                    agent.soft_target_network_update()
 
-            if(agent.num_param_update%agent.max_num_param_update==0):
-                agent.hard_target_network_update()
+            # if(agent.num_param_update%agent.max_num_param_update==0):
+            #     agent.hard_target_network_update()
             
             if done:
                 agent.score_list[e] = score
@@ -186,10 +187,11 @@ if __name__ == "__main__":
             
     #agent.save("cartpole-dqn.h5")
     #np.savetxt("dqn_scores.txt",agent.score_list,fmt='%.8f')
-
     plt.figure(1)
     #plt.subplot(121)
     plt.plot(agent.score_list, label="episodic score")
+    plt.xlabel('Episodes')
+    plt.ylabel('Reward')
     #plt.subplot(122)
     #plt.plot(average_reward, label="average score from all episodes")
     #plt.legend()

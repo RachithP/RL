@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import random, sys
+import random
 import gym
 import numpy as np
 from collections import deque
@@ -7,10 +7,11 @@ import torch
 import torch.nn as nn
 import torch.autograd as autograd
 import torch.nn.functional as F
+from scipy import stats
 import matplotlib.pyplot as plt
 from utils.PriorityBuffer import *
 
-EPISODES = 512                 # add these kinda variable to a config file and import for better code structuring
+EPISODES = 1000                 # add these kinda variable to a config file and import for better code structuring
 
 class DQNModel(nn.Module):
     def __init__(self, state_size, action_size, heads):
@@ -19,11 +20,11 @@ class DQNModel(nn.Module):
         self.action_size = action_size
         self.heads = heads
 
-        self.input_layer = nn.Linear(self.state_size, 128)
+        self.input_layer = nn.Linear(self.state_size, 24)
 
         for i in range(self.heads):
-            setattr(self, "hidden_%d" % i, nn.Linear(128, 128))
-            setattr(self, "output_{}".format(i), nn.Linear(128, self.action_size))
+            setattr(self, "hidden_%d" % i, nn.Linear(24, 24))
+            setattr(self, "output_{}".format(i), nn.Linear(24, self.action_size))
 
     def forward(self, state):
         y = []
@@ -41,9 +42,9 @@ class DQNAgent:
         self.state_size = state_size
         self.action_size = action_size
         self.heads = heads
-        self.max_memory_size = 10000
+        self.max_memory_size = 2000
         self.memory = PriorityBuffer(max_size=self.max_memory_size)
-        self.batch_size = 64
+        self.batch_size = 32
         self.gamma = 0.99    # discount rate
         self.epsilon = 1.0   # exploration rate
         self.epsilon_min = 0.01
@@ -54,6 +55,7 @@ class DQNAgent:
         self.target_model = DQNModel(self.state_size, self.action_size, self.heads).to(self.device)
         self.target_model.eval()
         self.score_list = np.zeros(EPISODES)
+        self.var = np.zeros(EPISODES)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self.mseloss = nn.MSELoss()
         self.smoothl1loss = nn.SmoothL1Loss()
@@ -92,9 +94,26 @@ class DQNAgent:
             return random.randrange(self.action_size)
         with torch.no_grad():
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            act_values = self.model.forward(state)[rand_index].squeeze()
-            return act_values.max(0)[1].item()  # returns action
+            Q_values = np.zeros(shape=(self.heads, self.action_size), dtype=np.float32)
+            for i, qvalue in enumerate(self.model.forward(state)):
+                Q_values[i, :] = qvalue.squeeze().cpu().numpy().reshape(1, self.action_size)            
+            return (self.model.forward(state)[rand_index].squeeze().cpu().numpy() + 5*Q_values.std(axis=0)).argmax()  # returns action
 
+
+    def estimate_uncertainty(self, states):
+        '''
+            Estimating uncertainty in actions as it is a better measure as compared to measuring uncertainty in q-value estimations,
+            because q values may be differently learnt and still have the relative difference in q-value(among different actions for the same state) the same?
+        '''
+        actions = np.zeros(shape=(self.batch_size,self.heads), dtype=np.float32)
+        with torch.no_grad():
+            for i, obs in enumerate(self.model.forward(states)):
+                actions[:, i] = obs.max(1)[0].cpu().numpy().reshape(self.batch_size)
+            actions = np.around(actions, decimals=1)
+            _, count = stats.mode(actions, axis=1)
+            var = (1 - count/self.heads).mean()
+        return var
+        
     def update(self):
         
         minibatch_experiences, minibatch_IS_weights, minibatch_tree_indices = self.memory.sample(self.batch_size)
@@ -117,7 +136,6 @@ class DQNAgent:
         weights = torch.FloatTensor(minibatch_IS_weights).reshape(
             self.batch_size, -1).to(self.device).squeeze()
 
-        
         # get q-values corresponding to actions at that step
         state_action_values = self.model.forward(states)
         model_q_values = self.model.forward(next_states)
@@ -163,6 +181,9 @@ class DQNAgent:
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
+        var = self.estimate_uncertainty(states)
+        return var
+
     def soft_target_network_update(self):
         for q_weight, target_weight in zip(self.model.parameters(), self.target_model.parameters()):
             target_weight.data.copy_(self.tau * q_weight + (1-self.tau)*target_weight)
@@ -178,7 +199,7 @@ class DQNAgent:
 
 
 if __name__ == "__main__":
-    env = gym.make('LunarLander-v2')
+    env = gym.make('CartPole-v1')
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.n
     agent = DQNAgent(state_size, action_size, heads=5)
@@ -191,19 +212,20 @@ if __name__ == "__main__":
         state = env.reset()
         state = np.reshape(state, [1, state_size])
         rand_value_func_index = np.random.randint(low=0, high=agent.heads)
-        score = 0
-        for time in range(1000):
+        var = 0
+
+        for time in range(500):
             #if(e>500):
             #    env.render()
             action = agent.act(state, rand_value_func_index)
             next_state, reward, done, _ = env.step(action)
+            reward = reward if not done else -10
             next_state = np.reshape(next_state, [1, state_size])
             mask = np.random.binomial(n=1, p=0.5, size=agent.heads)
             agent.remember(state, action, reward, next_state, done, mask)
             state = next_state
-            score+= reward
 
-            agent.update()
+            var += agent.update()
 
             if(agent.num_param_update%agent.max_num_param_update==0):
                 agent.hard_target_network_update()
@@ -212,11 +234,12 @@ if __name__ == "__main__":
             #     agent.soft_target_network_update()
 
             if done:
-                agent.score_list[e] = score
+                agent.score_list[e] = time
+                agent.var[e] = var/time
                 if(e>98):
                     average_reward = np.sum(agent.score_list[e-99:])/100.0
-                print("episode: {}/{}, score: {}, e: {:.2}, average_reward: {}"
-                      .format(e, EPISODES, score, agent.epsilon, average_reward))
+                print("episode: {}/{}, score: {}, e: {:.2}, average_reward: {}, var: {}"
+                      .format(e, EPISODES, time, agent.epsilon, average_reward, var/time))
                 break
             
     #agent.save("cartpole-dqn.h5")
@@ -225,9 +248,15 @@ if __name__ == "__main__":
     plt.figure(1)
     #plt.subplot(121)
     plt.plot(agent.score_list, label="episodic score")
+    plt.xlabel('Episodes')
+    plt.ylabel('Reward')
     #plt.subplot(122)
     #plt.plot(average_reward, label="average score from all episodes")
     #plt.legend()
+    plt.figure(2)
+    plt.plot(agent.var, label="episodic variance")
+    plt.xlabel('Episodes')
+    plt.ylabel('Variance in Q values')
     plt.show()
 
     env.close()
