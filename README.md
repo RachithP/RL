@@ -1,2 +1,2 @@
-- add __init__.py inside utils folder
+- add __ init __.py inside utils folder
 - add setup.py as in the directory and ```bash run pip install -e .``` in the project folder RL
